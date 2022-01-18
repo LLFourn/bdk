@@ -891,6 +891,7 @@ impl<Ctx: ScriptContext> ExtractPolicy for Miniscript<DescriptorPublicKey, Ctx> 
 
                 Policy::make_thresh(mapped, threshold)?
             }
+            Terminal::MultiA(_, _) => todo!(),
         })
     }
 }
@@ -969,6 +970,7 @@ impl ExtractPolicy for Descriptor<DescriptorPublicKey> {
                 WshInner::SortedMulti(ref keys) => make_sortedmulti(keys, signers, build_sat, secp),
             },
             Descriptor::Bare(ms) => Ok(ms.as_inner().extract_policy(signers, build_sat, secp)?),
+            Descriptor::Tr(_tr) => todo!(),
         }
     }
 }

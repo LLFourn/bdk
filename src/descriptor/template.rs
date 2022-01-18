@@ -17,7 +17,7 @@
 use bitcoin::util::bip32;
 use bitcoin::Network;
 
-use miniscript::{Legacy, Segwitv0};
+use miniscript::{Legacy, Segwitv0, Tap};
 
 use super::{ExtendedDescriptor, IntoWalletDescriptor, KeyMap};
 use crate::descriptor::DescriptorError;
@@ -166,6 +166,24 @@ pub struct P2Wpkh<K: IntoDescriptorKey<Segwitv0>>(pub K);
 impl<K: IntoDescriptorKey<Segwitv0>> DescriptorTemplate for P2Wpkh<K> {
     fn build(self) -> Result<DescriptorTemplateOut, DescriptorError> {
         descriptor!(wpkh(self.0))
+    }
+}
+
+/// TODO
+pub struct Tr<K: IntoDescriptorKey<Tap>>(pub K);
+
+impl<K: IntoDescriptorKey<Tap>> DescriptorTemplate for Tr<K> {
+    fn build(self) -> Result<DescriptorTemplateOut, DescriptorError> {
+        let key = self.0.into_descriptor_key()?;
+        let secp = crate::bitcoin::secp256k1::Secp256k1::new();
+        let (pk, key_map, valid_networks) = key.extract(&secp)?;
+        Ok((
+            miniscript::Descriptor::<miniscript::DescriptorPublicKey>::Tr(
+                miniscript::descriptor::Tr::new(pk, None)?,
+            ),
+            key_map,
+            valid_networks,
+        ))
     }
 }
 
@@ -397,6 +415,15 @@ impl<K: DerivableKey<Segwitv0>> DescriptorTemplate for Bip84Public<K> {
     }
 }
 
+/// TODO
+pub struct Bip86<K: DerivableKey<Tap>>(pub K, pub KeychainKind);
+
+impl<K: DerivableKey<Tap>> DescriptorTemplate for Bip86<K> {
+    fn build(self) -> Result<DescriptorTemplateOut, DescriptorError> {
+        Tr(taproot::make_bipxx_private(86, self.0, self.1)?).build()
+    }
+}
+
 macro_rules! expand_make_bipxx {
     ( $mod_name:ident, $ctx:ty ) => {
         mod $mod_name {
@@ -425,6 +452,8 @@ macro_rules! expand_make_bipxx {
 
                 Ok((key, derivation_path))
             }
+
+            #[allow(dead_code)]
             pub(super) fn make_bipxx_public<K: DerivableKey<$ctx>>(
                 bip: u32,
                 key: K,
@@ -450,6 +479,7 @@ macro_rules! expand_make_bipxx {
 
 expand_make_bipxx!(legacy, Legacy);
 expand_make_bipxx!(segwit_v0, Segwitv0);
+expand_make_bipxx!(taproot, Tap);
 
 #[cfg(test)]
 mod test {

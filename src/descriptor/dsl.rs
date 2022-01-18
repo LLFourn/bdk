@@ -416,14 +416,14 @@ macro_rules! descriptor {
         use $crate::miniscript::descriptor::{Descriptor, DescriptorPublicKey};
 
         $crate::impl_top_level_pk!(Pkh, $crate::miniscript::Legacy, $key)
-            .map(|(a, b, c)| (Descriptor::<DescriptorPublicKey>::Pkh(a), b, c))
+            .map(|(a, b, c)| (Descriptor::<DescriptorPublicKey, $crate::miniscript::descriptor::UnCached>::Pkh(a), b, c))
     });
     ( wpkh ( $key:expr ) ) => ({
         use $crate::miniscript::descriptor::{Descriptor, DescriptorPublicKey};
 
         $crate::impl_top_level_pk!(Wpkh, $crate::miniscript::Segwitv0, $key)
             .and_then(|(a, b, c)| Ok((a?, b, c)))
-            .map(|(a, b, c)| (Descriptor::<DescriptorPublicKey>::Wpkh(a), b, c))
+            .map(|(a, b, c)| (Descriptor::<DescriptorPublicKey,$crate::miniscript::descriptor::UnCached>::Wpkh(a), b, c))
     });
     ( sh ( wpkh ( $key:expr ) ) ) => ({
         $crate::descriptor!(shwpkh ( $key ))
@@ -433,7 +433,7 @@ macro_rules! descriptor {
 
         $crate::impl_top_level_pk!(Wpkh, $crate::miniscript::Segwitv0, $key)
             .and_then(|(a, b, c)| Ok((a?, b, c)))
-            .and_then(|(a, b, c)| Ok((Descriptor::<DescriptorPublicKey>::Sh(Sh::new_wpkh(a.into_inner())?), b, c)))
+            .and_then(|(a, b, c)| Ok((Descriptor::<DescriptorPublicKey, $crate::miniscript::descriptor::UnCached>::Sh(Sh::new_wpkh(a.into_inner())?), b, c)))
     });
     ( sh ( $( $minisc:tt )* ) ) => ({
         $crate::impl_top_level_sh!(Sh, new, new_sortedmulti, Legacy, $( $minisc )*)
@@ -708,7 +708,7 @@ mod test {
             if let Ok(address) = address {
                 assert_eq!(address.to_string(), *expected.get(i).unwrap());
             } else {
-                let script = child_desc.script_pubkey();
+                let script = child_desc.script_pubkey().unwrap();
                 assert_eq!(script.to_hex().as_str(), *expected.get(i).unwrap());
             }
         }

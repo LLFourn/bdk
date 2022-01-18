@@ -27,6 +27,8 @@ use miniscript::{MiniscriptKey, ToPublicKey, TranslatePk};
 
 use crate::wallet::utils::SecpCtx;
 
+use super::DerivedDescriptor;
+
 /// Extended [`DescriptorPublicKey`] that has been derived
 ///
 /// Derived keys are guaranteed to never contain wildcards of any kind
@@ -118,28 +120,25 @@ impl<'s> ToPublicKey for DerivedDescriptorKey<'s> {
 
 pub(crate) trait AsDerived {
     // Derive a descriptor and transform all of its keys to `DerivedDescriptorKey`
-    fn as_derived<'s>(&self, index: u32, secp: &'s SecpCtx)
-        -> Descriptor<DerivedDescriptorKey<'s>>;
+    fn as_derived<'s>(&self, index: u32, secp: &'s SecpCtx) -> DerivedDescriptor<'s>;
 
     // Transform the keys into `DerivedDescriptorKey`.
     //
     // Panics if the descriptor is not "fixed", i.e. if it's derivable
-    fn as_derived_fixed<'s>(&self, secp: &'s SecpCtx) -> Descriptor<DerivedDescriptorKey<'s>>;
+    fn as_derived_fixed<'s>(&self, secp: &'s SecpCtx) -> DerivedDescriptor<'s>;
 }
 
 impl AsDerived for Descriptor<DescriptorPublicKey> {
-    fn as_derived<'s>(
-        &self,
-        index: u32,
-        secp: &'s SecpCtx,
-    ) -> Descriptor<DerivedDescriptorKey<'s>> {
-        self.derive(index).translate_pk_infallible(
-            |key| DerivedDescriptorKey::new(key.clone(), secp),
-            |key| DerivedDescriptorKey::new(key.clone(), secp),
-        )
+    fn as_derived<'s>(&self, index: u32, secp: &'s SecpCtx) -> DerivedDescriptor<'s> {
+        self.derive(index)
+            .translate_pk_infallible(
+                |key| DerivedDescriptorKey::new(key.clone(), secp),
+                |key| DerivedDescriptorKey::new(key.clone(), secp),
+            )
+            .cache_spend_info(secp)
     }
 
-    fn as_derived_fixed<'s>(&self, secp: &'s SecpCtx) -> Descriptor<DerivedDescriptorKey<'s>> {
+    fn as_derived_fixed<'s>(&self, secp: &'s SecpCtx) -> DerivedDescriptor<'s> {
         assert!(!self.is_deriveable());
 
         self.as_derived(0, secp)

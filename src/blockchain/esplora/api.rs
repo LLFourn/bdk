@@ -2,7 +2,7 @@
 //!
 //! see: <https://github.com/Blockstream/esplora/blob/master/API.md>
 use crate::BlockTime;
-use bitcoin::{OutPoint, Script, Transaction, TxIn, TxOut, Txid, blockdata::witness::Witness};
+use bitcoin::{blockdata::witness::Witness, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
 
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct PrevOut {

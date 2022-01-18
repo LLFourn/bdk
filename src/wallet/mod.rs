@@ -90,8 +90,8 @@ pub struct Wallet<B, D> {
     descriptor: ExtendedDescriptor,
     change_descriptor: Option<ExtendedDescriptor>,
 
-    signers: Arc<SignersContainer>,
-    change_signers: Arc<SignersContainer>,
+    signers: SignersContainer,
+    change_signers: SignersContainer,
 
     address_validators: Vec<Arc<dyn AddressValidator>>,
 
@@ -139,7 +139,7 @@ where
             KeychainKind::External,
             get_checksum(&descriptor.to_string())?.as_bytes(),
         )?;
-        let signers = Arc::new(SignersContainer::from(keymap));
+        let signers = SignersContainer::from(keymap);
         let (change_descriptor, change_signers) = match change_descriptor {
             Some(desc) => {
                 let (change_descriptor, change_keymap) =
@@ -149,14 +149,14 @@ where
                     get_checksum(&change_descriptor.to_string())?.as_bytes(),
                 )?;
 
-                let change_signers = Arc::new(SignersContainer::from(change_keymap));
+                let change_signers = SignersContainer::from(change_keymap);
                 // if !parsed.same_structure(descriptor.as_ref()) {
                 //     return Err(Error::DifferentDescriptorStructure);
                 // }
 
                 (Some(change_descriptor), change_signers)
             }
-            None => (None, Arc::new(SignersContainer::new())),
+            None => (None, SignersContainer::new()),
         };
 
         Ok(Wallet {
@@ -265,7 +265,7 @@ where
             .get_descriptor_for_keychain(keychain)
             .as_derived(current_index, &self.secp);
 
-        let script_pubkey = derived_key.script_pubkey();
+        let script_pubkey = derived_key.script_pubkey().unwrap();
 
         let found_used = self
             .list_transactions(true)?
@@ -401,11 +401,19 @@ where
         signer: Arc<dyn Signer>,
     ) {
         let signers = match keychain {
-            KeychainKind::External => Arc::make_mut(&mut self.signers),
-            KeychainKind::Internal => Arc::make_mut(&mut self.change_signers),
+            KeychainKind::External => &mut self.signers,
+            KeychainKind::Internal => &mut self.change_signers,
         };
 
         signers.add_external(signer.id(&self.secp), ordering, signer);
+    }
+
+    /// Gets the `SignersContainer` for a keychain.
+    pub fn get_signers(&mut self, keychain: KeychainKind) -> &mut SignersContainer {
+        match keychain {
+            KeychainKind::External => &mut self.signers,
+            KeychainKind::Internal => &mut self.change_signers,
+        }
     }
 
     /// Add an address validator
@@ -848,9 +856,10 @@ where
                     .borrow()
                     .get_path_from_script_pubkey(&txout.script_pubkey)?
                 {
-                    Some((keychain, _)) => (
+                    Some((keychain, index)) => (
                         self._get_descriptor_for_keychain(keychain)
                             .0
+                            .as_derived(index, &self.secp)
                             .max_satisfaction_weight()
                             .unwrap(),
                         keychain,
@@ -1170,7 +1179,7 @@ where
         let derived_descriptor = descriptor.as_derived(index, &self.secp);
 
         let hd_keypaths = derived_descriptor.get_hd_keypaths(&self.secp)?;
-        let script = derived_descriptor.script_pubkey();
+        let script = derived_descriptor.script_pubkey().unwrap();
 
         for validator in &self.address_validators {
             validator.validate(keychain, &hd_keypaths, &script)?;
@@ -1218,7 +1227,10 @@ where
         let start_time = time::Instant::new();
         for i in from..(from + count) {
             address_batch.set_script_pubkey(
-                &descriptor.as_derived(i, &self.secp).script_pubkey(),
+                &descriptor
+                    .as_derived(i, &self.secp)
+                    .script_pubkey()
+                    .unwrap(),
                 keychain,
                 i,
             )?;
@@ -1237,19 +1249,17 @@ where
     }
 
     fn get_available_utxos(&self) -> Result<Vec<(LocalUtxo, usize)>, Error> {
-        Ok(self
-            .list_unspent()?
+        self.list_unspent()?
             .into_iter()
             .map(|utxo| {
-                let keychain = utxo.keychain;
-                (
-                    utxo,
-                    self.get_descriptor_for_keychain(keychain)
-                        .max_satisfaction_weight()
-                        .unwrap(),
-                )
+                let weight = self
+                    .get_descriptor_for_script_pubkey(&utxo.txout.script_pubkey)?
+                    .unwrap()
+                    .max_satisfaction_weight()
+                    .unwrap();
+                Ok((utxo, weight))
             })
-            .collect())
+            .collect()
     }
 
     /// Given the options returns the list of utxos that must be used to form the
@@ -1673,6 +1683,7 @@ pub fn get_funded_wallet(
 #[cfg(test)]
 pub(crate) mod test {
     use bitcoin::{util::psbt, Network};
+    use miniscript::descriptor::Cached;
 
     use crate::database::Database;
     use crate::types::KeychainKind;
@@ -2552,7 +2563,9 @@ pub(crate) mod test {
         let addr = Address::from_str("2N1Ffz3WaNzbeLFBb51xyFMHYSEUXcbiSoX").unwrap();
         let utxo = wallet2.list_unspent().unwrap().remove(0);
         let foreign_utxo_satisfaction = wallet2
-            .get_descriptor_for_keychain(KeychainKind::External)
+            .get_descriptor_for_script_pubkey(&utxo.txout.script_pubkey)
+            .unwrap()
+            .unwrap()
             .max_satisfaction_weight()
             .unwrap();
 
@@ -2616,12 +2629,8 @@ pub(crate) mod test {
         let (wallet, _, _) = get_funded_wallet(get_test_wpkh());
         let mut builder = wallet.build_tx();
         let outpoint = wallet.list_unspent().unwrap()[0].outpoint;
-        let foreign_utxo_satisfaction = wallet
-            .get_descriptor_for_keychain(KeychainKind::External)
-            .max_satisfaction_weight()
-            .unwrap();
         builder
-            .add_foreign_utxo(outpoint, psbt::Input::default(), foreign_utxo_satisfaction)
+            .add_foreign_utxo(outpoint, psbt::Input::default(), 42)
             .unwrap();
     }
 
@@ -2649,11 +2658,6 @@ pub(crate) mod test {
             .transaction
             .unwrap();
 
-        let satisfaction_weight = wallet2
-            .get_descriptor_for_keychain(KeychainKind::External)
-            .max_satisfaction_weight()
-            .unwrap();
-
         let mut builder = wallet1.build_tx();
         assert!(
             builder
@@ -2663,7 +2667,7 @@ pub(crate) mod test {
                         non_witness_utxo: Some(tx1),
                         ..Default::default()
                     },
-                    satisfaction_weight
+                    42
                 )
                 .is_err(),
             "should fail when outpoint doesn't match psbt_input"
@@ -2676,7 +2680,7 @@ pub(crate) mod test {
                         non_witness_utxo: Some(tx2),
                         ..Default::default()
                     },
-                    satisfaction_weight
+                    42
                 )
                 .is_ok(),
             "shoulld be ok when outpoint does match psbt_input"
@@ -2691,11 +2695,6 @@ pub(crate) mod test {
         let addr = Address::from_str("2N1Ffz3WaNzbeLFBb51xyFMHYSEUXcbiSoX").unwrap();
         let utxo2 = wallet2.list_unspent().unwrap().remove(0);
 
-        let satisfaction_weight = wallet2
-            .get_descriptor_for_keychain(KeychainKind::External)
-            .max_satisfaction_weight()
-            .unwrap();
-
         let mut builder = wallet1.build_tx();
         builder.add_recipient(addr.script_pubkey(), 60_000);
 
@@ -2706,7 +2705,7 @@ pub(crate) mod test {
                 ..Default::default()
             };
             builder
-                .add_foreign_utxo(utxo2.outpoint, psbt_input, satisfaction_weight)
+                .add_foreign_utxo(utxo2.outpoint, psbt_input, 42)
                 .unwrap();
             assert!(
                 builder.finish().is_err(),
@@ -2722,7 +2721,7 @@ pub(crate) mod test {
             };
             builder
                 .only_witness_utxo()
-                .add_foreign_utxo(utxo2.outpoint, psbt_input, satisfaction_weight)
+                .add_foreign_utxo(utxo2.outpoint, psbt_input, 42)
                 .unwrap();
             assert!(
                 builder.finish().is_ok(),
@@ -2745,7 +2744,7 @@ pub(crate) mod test {
                 ..Default::default()
             };
             builder
-                .add_foreign_utxo(utxo2.outpoint, psbt_input, satisfaction_weight)
+                .add_foreign_utxo(utxo2.outpoint, psbt_input, 42)
                 .unwrap();
             assert!(
                 builder.finish().is_ok(),
@@ -3762,11 +3761,12 @@ pub(crate) mod test {
         let dud_input = bitcoin::util::psbt::Input {
             witness_utxo: Some(TxOut {
                 value: 100_000,
-                script_pubkey: miniscript::Descriptor::<bitcoin::PublicKey>::from_str(
+                script_pubkey: miniscript::Descriptor::<bitcoin::PublicKey, Cached>::from_str(
                     "wpkh(025476c2e83188368da1ff3e292e7acafcdb3566bb0ad253f62fc70f07aeee6357)",
                 )
                 .unwrap()
-                .script_pubkey(),
+                .script_pubkey()
+                .unwrap(),
             }),
             ..Default::default()
         };

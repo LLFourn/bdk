@@ -16,7 +16,7 @@ pub mod blockchain_tests;
 use bitcoin::secp256k1::{Secp256k1, Verification};
 use bitcoin::{Address, PublicKey};
 
-use miniscript::descriptor::DescriptorPublicKey;
+use miniscript::descriptor::{Cached, DescriptorPublicKey};
 use miniscript::{Descriptor, MiniscriptKey, TranslatePk};
 
 #[derive(Clone, Debug)]
@@ -69,7 +69,7 @@ pub trait TranslateDescriptor {
         &self,
         secp: &Secp256k1<C>,
         index: u32,
-    ) -> Descriptor<PublicKey>;
+    ) -> Descriptor<PublicKey, Cached>;
 }
 
 impl TranslateDescriptor for Descriptor<DescriptorPublicKey> {
@@ -77,7 +77,7 @@ impl TranslateDescriptor for Descriptor<DescriptorPublicKey> {
         &self,
         secp: &Secp256k1<C>,
         index: u32,
-    ) -> Descriptor<PublicKey> {
+    ) -> Descriptor<PublicKey, Cached> {
         let translate = |key: &DescriptorPublicKey| -> PublicKey {
             match key {
                 DescriptorPublicKey::XPub(xpub) => bitcoin::PublicKey::new(
@@ -92,6 +92,7 @@ impl TranslateDescriptor for Descriptor<DescriptorPublicKey> {
 
         self.derive(index)
             .translate_pk_infallible(|pk| translate(pk), |pkh| translate(pkh).to_pubkeyhash())
+            .cache_spend_info(secp)
     }
 }
 

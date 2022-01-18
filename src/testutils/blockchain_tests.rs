@@ -2,7 +2,7 @@ use crate::testutils::TestIncomingTx;
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::hashes::sha256d;
-use bitcoin::{Address, Amount, Script, Transaction, Txid, blockdata::witness::Witness};
+use bitcoin::{blockdata::witness::Witness, Address, Amount, Script, Transaction, Txid};
 pub use bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
 use core::str::FromStr;
 use electrsd::bitcoind::BitcoinD;
@@ -197,8 +197,10 @@ impl TestClient {
         let mut block = Block { header, txdata };
 
         let witness_root = block.witness_root().unwrap();
-        let witness_commitment =
-            Block::compute_witness_commitment(&witness_root, &coinbase_tx.input[0].witness.to_vec()[0]);
+        let witness_commitment = Block::compute_witness_commitment(
+            &witness_root,
+            &coinbase_tx.input[0].witness.to_vec()[0],
+        );
 
         // now update and replace the coinbase tx
         let mut coinbase_witness_commitment_script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
