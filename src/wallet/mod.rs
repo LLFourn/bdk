@@ -3651,6 +3651,23 @@ pub(crate) mod test {
         assert_eq!(extracted.input[0].witness.len(), 2);
     }
 
+
+    #[test]
+    fn test_sign_single_xprv_tr() {
+        let (wallet, _, _) = get_funded_wallet("tr(tprv8ZgxMBicQKsPd3EupYiPRhaMooHKUHJxNsTfYuScep13go8QFfHdtkG9nRkFGb7busX4isf6X9dURGCoKgitaApQ6MupRhZMcELAxTBRJgS/*)");
+        let addr = wallet.get_address(New).unwrap();
+        let mut builder = wallet.build_tx();
+        builder.drain_to(addr.script_pubkey()).drain_wallet();
+        let (mut psbt, _) = builder.finish().unwrap();
+
+        let finalized = wallet.sign(&mut psbt, Default::default()).unwrap();
+        assert!(finalized);
+
+        let extracted = psbt.extract_tx();
+        assert_eq!(extracted.input[0].witness.len(), 1);
+    }
+
+
     #[test]
     fn test_sign_single_xprv_with_master_fingerprint_and_path() {
         let (wallet, _, _) = get_funded_wallet("wpkh([d34db33f/84h/1h/0h]tprv8ZgxMBicQKsPd3EupYiPRhaMooHKUHJxNsTfYuScep13go8QFfHdtkG9nRkFGb7busX4isf6X9dURGCoKgitaApQ6MupRhZMcELAxTBRJgS/*)");
