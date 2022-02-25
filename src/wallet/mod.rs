@@ -1019,10 +1019,9 @@ where
         }
     }
 
-
     /// get the signers
     pub fn signers(&self) -> (&SignersContainer, &SignersContainer) {
-        (self.signers.as_ref(), self.change_signers.as_ref())
+        (&self.signers, &self.change_signers)
     }
 
     /// Return the "public" version of the wallet's descriptor, meaning a new descriptor that has
