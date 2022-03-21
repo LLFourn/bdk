@@ -32,8 +32,9 @@ use bitcoin::{
     Address, EcdsaSigHashType as SigHashType, Network, OutPoint, Script, Transaction, TxOut, Txid,
 };
 
-use miniscript::descriptor::DescriptorTrait;
+use miniscript::descriptor::{Descriptor, DescriptorTrait};
 use miniscript::psbt::PsbtInputSatisfier;
+use miniscript::ToPublicKey;
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace};
@@ -90,8 +91,8 @@ pub struct Wallet<B, D> {
     descriptor: ExtendedDescriptor,
     change_descriptor: Option<ExtendedDescriptor>,
 
-    signers: Arc<SignersContainer>,
-    change_signers: Arc<SignersContainer>,
+    signers: SignersContainer,
+    change_signers: SignersContainer,
 
     address_validators: Vec<Arc<dyn AddressValidator>>,
 
@@ -139,7 +140,7 @@ where
             KeychainKind::External,
             get_checksum(&descriptor.to_string())?.as_bytes(),
         )?;
-        let signers = Arc::new(SignersContainer::from(keymap));
+        let signers = SignersContainer::from(keymap);
         let (change_descriptor, change_signers) = match change_descriptor {
             Some(desc) => {
                 let (change_descriptor, change_keymap) =
@@ -149,14 +150,14 @@ where
                     get_checksum(&change_descriptor.to_string())?.as_bytes(),
                 )?;
 
-                let change_signers = Arc::new(SignersContainer::from(change_keymap));
+                let change_signers = SignersContainer::from(change_keymap);
                 // if !parsed.same_structure(descriptor.as_ref()) {
                 //     return Err(Error::DifferentDescriptorStructure);
                 // }
 
                 (Some(change_descriptor), change_signers)
             }
-            None => (None, Arc::new(SignersContainer::new())),
+            None => (None, SignersContainer::new()),
         };
 
         Ok(Wallet {
@@ -401,11 +402,19 @@ where
         signer: Arc<dyn Signer>,
     ) {
         let signers = match keychain {
-            KeychainKind::External => Arc::make_mut(&mut self.signers),
-            KeychainKind::Internal => Arc::make_mut(&mut self.change_signers),
+            KeychainKind::External => &mut self.signers,
+            KeychainKind::Internal => &mut self.change_signers,
         };
 
         signers.add_external(signer.id(&self.secp), ordering, signer);
+    }
+
+    /// Gets the `SignersContainer` for a keychain.
+    pub fn get_signers(&mut self, keychain: KeychainKind) -> &mut SignersContainer {
+        match keychain {
+            KeychainKind::External => &mut self.signers,
+            KeychainKind::Internal => &mut self.change_signers,
+        }
     }
 
     /// Add an address validator
@@ -848,9 +857,10 @@ where
                     .borrow()
                     .get_path_from_script_pubkey(&txout.script_pubkey)?
                 {
-                    Some((keychain, _)) => (
+                    Some((keychain, index)) => (
                         self._get_descriptor_for_keychain(keychain)
                             .0
+                            .as_derived(index, &self.secp)
                             .max_satisfaction_weight()
                             .unwrap(),
                         keychain,
@@ -1009,10 +1019,9 @@ where
         }
     }
 
-
     /// get the signers
     pub fn signers(&self) -> (&SignersContainer, &SignersContainer) {
-        (self.signers.as_ref(), self.change_signers.as_ref())
+        (&self.signers, &self.change_signers)
     }
 
     /// Return the "public" version of the wallet's descriptor, meaning a new descriptor that has
@@ -1243,19 +1252,16 @@ where
     }
 
     fn get_available_utxos(&self) -> Result<Vec<(LocalUtxo, usize)>, Error> {
-        Ok(self
-            .list_unspent()?
+        self.list_unspent()?
             .into_iter()
             .map(|utxo| {
-                let keychain = utxo.keychain;
-                (
-                    utxo,
-                    self.get_descriptor_for_keychain(keychain)
-                        .max_satisfaction_weight()
-                        .unwrap(),
-                )
+                let weight = self
+                    .get_descriptor_for_keychain(KeychainKind::External)
+                    .max_satisfaction_weight()
+                    .unwrap();
+                Ok((utxo, weight))
             })
-            .collect())
+            .collect()
     }
 
     /// Given the options returns the list of utxos that must be used to form the
@@ -1467,6 +1473,11 @@ where
                 psbt_input.non_witness_utxo = Some(prev_tx);
             }
         }
+
+        if let Descriptor::Tr(tr) = derived_descriptor {
+            psbt_input.tap_internal_key = Some(tr.internal_key().to_x_only_pubkey());
+        };
+
         Ok(psbt_input)
     }
 
@@ -2246,13 +2257,10 @@ pub(crate) mod test {
         let mut builder = wallet.build_tx();
         builder
             .add_recipient(addr.script_pubkey(), 30_000)
-            .sighash(bitcoin::EcdsaSigHashType::Single);
+            .sighash(SigHashType::Single);
         let (psbt, _) = builder.finish().unwrap();
 
-        assert_eq!(
-            psbt.inputs[0].sighash_type,
-            Some(bitcoin::EcdsaSigHashType::Single)
-        );
+        assert_eq!(psbt.inputs[0].sighash_type, Some(SigHashType::Single));
     }
 
     #[test]
@@ -2621,12 +2629,8 @@ pub(crate) mod test {
         let (wallet, _, _) = get_funded_wallet(get_test_wpkh());
         let mut builder = wallet.build_tx();
         let outpoint = wallet.list_unspent().unwrap()[0].outpoint;
-        let foreign_utxo_satisfaction = wallet
-            .get_descriptor_for_keychain(KeychainKind::External)
-            .max_satisfaction_weight()
-            .unwrap();
         builder
-            .add_foreign_utxo(outpoint, psbt::Input::default(), foreign_utxo_satisfaction)
+            .add_foreign_utxo(outpoint, psbt::Input::default(), 42)
             .unwrap();
     }
 
@@ -2654,11 +2658,6 @@ pub(crate) mod test {
             .transaction
             .unwrap();
 
-        let satisfaction_weight = wallet2
-            .get_descriptor_for_keychain(KeychainKind::External)
-            .max_satisfaction_weight()
-            .unwrap();
-
         let mut builder = wallet1.build_tx();
         assert!(
             builder
@@ -2668,7 +2667,7 @@ pub(crate) mod test {
                         non_witness_utxo: Some(tx1),
                         ..Default::default()
                     },
-                    satisfaction_weight
+                    42
                 )
                 .is_err(),
             "should fail when outpoint doesn't match psbt_input"
@@ -2681,7 +2680,7 @@ pub(crate) mod test {
                         non_witness_utxo: Some(tx2),
                         ..Default::default()
                     },
-                    satisfaction_weight
+                    42
                 )
                 .is_ok(),
             "shoulld be ok when outpoint does match psbt_input"
@@ -2696,11 +2695,6 @@ pub(crate) mod test {
         let addr = Address::from_str("2N1Ffz3WaNzbeLFBb51xyFMHYSEUXcbiSoX").unwrap();
         let utxo2 = wallet2.list_unspent().unwrap().remove(0);
 
-        let satisfaction_weight = wallet2
-            .get_descriptor_for_keychain(KeychainKind::External)
-            .max_satisfaction_weight()
-            .unwrap();
-
         let mut builder = wallet1.build_tx();
         builder.add_recipient(addr.script_pubkey(), 60_000);
 
@@ -2711,7 +2705,7 @@ pub(crate) mod test {
                 ..Default::default()
             };
             builder
-                .add_foreign_utxo(utxo2.outpoint, psbt_input, satisfaction_weight)
+                .add_foreign_utxo(utxo2.outpoint, psbt_input, 42)
                 .unwrap();
             assert!(
                 builder.finish().is_err(),
@@ -2727,7 +2721,7 @@ pub(crate) mod test {
             };
             builder
                 .only_witness_utxo()
-                .add_foreign_utxo(utxo2.outpoint, psbt_input, satisfaction_weight)
+                .add_foreign_utxo(utxo2.outpoint, psbt_input, 42)
                 .unwrap();
             assert!(
                 builder.finish().is_ok(),
@@ -2750,7 +2744,7 @@ pub(crate) mod test {
                 ..Default::default()
             };
             builder
-                .add_foreign_utxo(utxo2.outpoint, psbt_input, satisfaction_weight)
+                .add_foreign_utxo(utxo2.outpoint, psbt_input, 42)
                 .unwrap();
             assert!(
                 builder.finish().is_ok(),
@@ -3655,6 +3649,21 @@ pub(crate) mod test {
 
         let extracted = psbt.extract_tx();
         assert_eq!(extracted.input[0].witness.len(), 2);
+    }
+
+    #[test]
+    fn test_sign_single_xprv_tr() {
+        let (wallet, _, _) = get_funded_wallet("tr(tprv8ZgxMBicQKsPd3EupYiPRhaMooHKUHJxNsTfYuScep13go8QFfHdtkG9nRkFGb7busX4isf6X9dURGCoKgitaApQ6MupRhZMcELAxTBRJgS)");
+        let addr = wallet.get_address(New).unwrap();
+        let mut builder = wallet.build_tx();
+        builder.drain_to(addr.script_pubkey()).drain_wallet();
+        let (mut psbt, _) = builder.finish().unwrap();
+
+        let finalized = wallet.sign(&mut psbt, Default::default()).unwrap();
+        assert!(finalized);
+
+        let extracted = psbt.extract_tx();
+        assert_eq!(extracted.input[0].witness.len(), 1);
     }
 
     #[test]

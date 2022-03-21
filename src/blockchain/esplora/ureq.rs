@@ -103,35 +103,39 @@ impl Blockchain for EsploraBlockchain {
                         .take(self.concurrency as usize)
                         .cloned();
 
-                    let handles = scripts.map(move |script| {
-                        let client = self.url_client.clone();
-                        // make each request in its own thread.
-                        std::thread::spawn(move || {
-                            let mut related_txs: Vec<Tx> = client._scripthash_txs(&script, None)?;
+                    let handles = scripts
+                        .map(move |script| {
+                            let client = self.url_client.clone();
+                            // make each request in its own thread.
+                            std::thread::spawn(move || {
+                                let mut related_txs: Vec<Tx> =
+                                    client._scripthash_txs(&script, None)?;
 
-                            let n_confirmed =
-                                related_txs.iter().filter(|tx| tx.status.confirmed).count();
-                            // esplora pages on 25 confirmed transactions. If there's 25 or more we
-                            // keep requesting to see if there's more.
-                            if n_confirmed >= 25 {
-                                loop {
-                                    let new_related_txs: Vec<Tx> = client._scripthash_txs(
-                                        &script,
-                                        Some(related_txs.last().unwrap().txid),
-                                    )?;
-                                    let n = new_related_txs.len();
-                                    related_txs.extend(new_related_txs);
-                                    // we've reached the end
-                                    if n < 25 {
-                                        break;
+                                let n_confirmed =
+                                    related_txs.iter().filter(|tx| tx.status.confirmed).count();
+                                // esplora pages on 25 confirmed transactions. If there's 25 or more we
+                                // keep requesting to see if there's more.
+                                if n_confirmed >= 25 {
+                                    loop {
+                                        let new_related_txs: Vec<Tx> = client._scripthash_txs(
+                                            &script,
+                                            Some(related_txs.last().unwrap().txid),
+                                        )?;
+                                        let n = new_related_txs.len();
+                                        related_txs.extend(new_related_txs);
+                                        // we've reached the end
+                                        if n < 25 {
+                                            break;
+                                        }
                                     }
                                 }
-                            }
-                            Result::<_, Error>::Ok(related_txs)
+                                Result::<_, Error>::Ok(related_txs)
+                            })
                         })
-                    });
+                        .collect::<Vec<_>>();
 
                     let txs_per_script: Vec<Vec<Tx>> = handles
+                        .into_iter()
                         .map(|handle| handle.join().unwrap())
                         .collect::<Result<_, _>>()?;
                     let mut satisfaction = vec![];

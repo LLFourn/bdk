@@ -2,7 +2,7 @@ use crate::testutils::TestIncomingTx;
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::hashes::sha256d;
-use bitcoin::{Address, Amount, Script, Transaction, Txid, blockdata::witness::Witness};
+use bitcoin::{blockdata::witness::Witness, Address, Amount, Script, Transaction, Txid};
 pub use bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
 use core::str::FromStr;
 use electrsd::bitcoind::BitcoinD;
@@ -197,8 +197,10 @@ impl TestClient {
         let mut block = Block { header, txdata };
 
         let witness_root = block.witness_root().unwrap();
-        let witness_commitment =
-            Block::compute_witness_commitment(&witness_root, &coinbase_tx.input[0].witness.to_vec()[0]);
+        let witness_commitment = Block::compute_witness_commitment(
+            &witness_root,
+            &coinbase_tx.input[0].witness.to_vec()[0],
+        );
 
         // now update and replace the coinbase tx
         let mut coinbase_witness_commitment_script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
@@ -346,7 +348,7 @@ macro_rules! bdk_blockchain_tests {
      fn $_fn_name:ident ( $( $test_client:ident : &TestClient )? $(,)? ) -> $blockchain:ty $block:block) => {
         #[cfg(test)]
         mod bdk_blockchain_tests {
-            use $crate::bitcoin::Network;
+            use $crate::bitcoin::{Network, Address};
             use $crate::testutils::blockchain_tests::TestClient;
             use $crate::blockchain::noop_progress;
             use $crate::database::MemoryDatabase;
@@ -354,6 +356,8 @@ macro_rules! bdk_blockchain_tests {
             use $crate::{Wallet, FeeRate};
             use $crate::testutils;
             use $crate::blockchain::*;
+            use $crate::wallet::AddressIndex;
+            use core::str::FromStr;
             #[allow(unused_imports)]
             use super::*;
 
@@ -367,12 +371,8 @@ macro_rules! bdk_blockchain_tests {
                 Wallet::new(&descriptors.0.to_string(), descriptors.1.as_ref(), Network::Regtest, MemoryDatabase::new(), get_blockchain(test_client)).unwrap()
             }
 
-            fn init_single_sig() -> (Wallet<$blockchain, MemoryDatabase>, (String, Option<String>), TestClient) {
+            fn _init_single_sig(descriptors: (String, Option<String>)) -> (Wallet<$blockchain, MemoryDatabase>, (String, Option<String>), TestClient) {
                 let _ = env_logger::try_init();
-
-                let descriptors = testutils! {
-                    @descriptors ( "wpkh(Alice)" ) ( "wpkh(Alice)" ) ( @keys ( "Alice" => (@generate_xprv "/44'/0'/0'/0/*", "/44'/0'/0'/1/*") ) )
-                };
 
                 let test_client = TestClient::default();
                 let wallet = get_wallet_from_descriptors(&descriptors, &test_client);
@@ -382,6 +382,20 @@ macro_rules! bdk_blockchain_tests {
                 wallet.sync(noop_progress(), None).unwrap();
 
                 (wallet, descriptors, test_client)
+            }
+
+            fn init_single_sig() -> (Wallet<$blockchain, MemoryDatabase>, (String, Option<String>), TestClient) {
+                let descriptors = testutils! {
+                    @descriptors ( "wpkh(Alice)" ) ( "wpkh(Alice)" ) ( @keys ( "Alice" => (@generate_xprv "/44'/0'/0'/0/*", "/44'/0'/0'/1/*") ) )
+                };
+                _init_single_sig(descriptors)
+            }
+
+            fn init_single_sig_tr() -> (Wallet<$blockchain, MemoryDatabase>, (String, Option<String>), TestClient) {
+                let descriptors = testutils! {
+                    @descriptors ( "tr(Alice)" ) ( "tr(Alice)" ) ( @keys ( "Alice" => (@generate_xprv "/86'/0'/0'/0/*", "/86'/0'/0'/1/*") ) )
+                };
+                _init_single_sig(descriptors)
             }
 
             #[test]
@@ -601,6 +615,36 @@ macro_rules! bdk_blockchain_tests {
 
                 assert_eq!(wallet.list_transactions(false).unwrap().len(), 2, "incorrect number of txs");
                 assert_eq!(wallet.list_unspent().unwrap().len(), 1, "incorrect number of unspents");
+            }
+
+            #[test]
+            fn test_sync_after_send_tr() {
+                let (wallet, descriptors, mut test_client) = init_single_sig_tr();
+                println!("{}", descriptors.0);
+                let node_addr = test_client.get_node_address();
+
+                test_client.receive(testutils! {
+                    @tx ( (@external descriptors, 0) => 50_000 )
+                });
+
+                wallet.sync(noop_progress(), None).unwrap();
+                assert_eq!(wallet.get_balance().unwrap(), 50_000, "incorrect balance");
+
+                let mut builder = wallet.build_tx();
+                builder.add_recipient(node_addr.script_pubkey(), 25_000);
+                builder.add_recipient(wallet.get_address(AddressIndex::New).unwrap().script_pubkey(), 10_000);
+                let (mut psbt, details) = builder.finish().unwrap();
+                let finalized = wallet.sign(&mut psbt, Default::default()).unwrap();
+                assert!(finalized, "Cannot finalize transaction");
+                let tx = psbt.extract_tx();
+                println!("{}", bitcoin::consensus::encode::serialize_hex(&tx));
+                wallet.broadcast(&tx).unwrap();
+                wallet.sync(noop_progress(), None).unwrap();
+                dbg!(wallet.get_balance().unwrap(), details.received);
+                assert_eq!(wallet.get_balance().unwrap(), details.received, "incorrect balance after send");
+
+                assert_eq!(wallet.list_transactions(false).unwrap().len(), 2, "incorrect number of txs");
+                assert_eq!(wallet.list_unspent().unwrap().len(), 2, "incorrect number of unspents");
             }
 
             /// Send two conflicting transactions to the same address twice in a row.

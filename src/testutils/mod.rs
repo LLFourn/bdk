@@ -16,8 +16,8 @@ pub mod blockchain_tests;
 use bitcoin::secp256k1::{Secp256k1, Verification};
 use bitcoin::{Address, PublicKey};
 
-use miniscript::descriptor::DescriptorPublicKey;
-use miniscript::{Descriptor, MiniscriptKey, TranslatePk};
+use miniscript::descriptor::{DescriptorPublicKey, SinglePubKey};
+use miniscript::{Descriptor, MiniscriptKey, ToPublicKey, TranslatePk};
 
 #[derive(Clone, Debug)]
 pub struct TestIncomingOutput {
@@ -86,7 +86,10 @@ impl TranslateDescriptor for Descriptor<DescriptorPublicKey> {
                         .expect("hardened derivation steps")
                         .public_key,
                 ),
-                DescriptorPublicKey::SinglePub(key) => key.key,
+                DescriptorPublicKey::SinglePub(key) => match key.key {
+                    SinglePubKey::FullKey(key) => key.to_public_key(),
+                    SinglePubKey::XOnly(key) => key.to_public_key(),
+                },
             }
         };
 

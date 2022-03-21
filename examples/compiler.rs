@@ -29,7 +29,7 @@ use miniscript::Descriptor;
 
 use bdk::database::memory::MemoryDatabase;
 use bdk::wallet::AddressIndex::New;
-use bdk::{KeychainKind, Wallet};
+use bdk::Wallet;
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init_from_env(
@@ -93,13 +93,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     info!("... First address: {}", wallet.get_address(New)?);
 
-    if matches.is_present("parsed_policy") {
-        let spending_policy = wallet.policies(KeychainKind::External)?;
-        info!(
-            "... Spending policy:\n{}",
-            serde_json::to_string_pretty(&spending_policy)?
-        );
-    }
+    // if matches.is_present("parsed_policy") {
+    //     let spending_policy = wallet.policies(KeychainKind::External)?;
+    //     info!(
+    //         "... Spending policy:\n{}",
+    //         serde_json::to_string_pretty(&spending_policy)?
+    //     );
+    // }
 
     Ok(())
 }

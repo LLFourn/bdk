@@ -31,7 +31,7 @@
 //!
 //! let signers = Arc::new(key_map.into());
 //! let policy = extended_desc.extract_policy(&signers, BuildSatisfaction::None, &secp)?;
-//! println!("policy: {}", serde_json::to_string(&policy)?);
+//! // println!("policy: {}", serde_json::to_string(&policy)?);
 //! # Ok::<(), bdk::Error>(())
 //! ```
 
@@ -44,9 +44,10 @@ use serde::{Serialize, Serializer};
 
 use bitcoin::hashes::*;
 use bitcoin::util::bip32::Fingerprint;
-use bitcoin::PublicKey;
 
-use miniscript::descriptor::{DescriptorPublicKey, ShInner, SortedMultiVec, WshInner};
+use miniscript::descriptor::{
+    DescriptorPublicKey, ShInner, SinglePubKey, SortedMultiVec, WshInner,
+};
 use miniscript::{Descriptor, Miniscript, MiniscriptKey, Satisfier, ScriptContext, Terminal};
 
 #[allow(unused_imports)]
@@ -63,13 +64,14 @@ use bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
 use miniscript::psbt::PsbtInputSatisfier;
 
 /// Raw public key or extended key fingerprint
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct PkOrF {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pubkey: Option<PublicKey>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // #[serde(skip_serializing_if = "Option::is_none")]
+    pubkey: Option<SinglePubKey>,
+    // #[serde(skip_serializing_if = "Option::is_none")]
     pubkey_hash: Option<hash160::Hash>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<Fingerprint>,
 }
 
@@ -77,7 +79,7 @@ impl PkOrF {
     fn from_key(k: &DescriptorPublicKey, secp: &SecpCtx) -> Self {
         match k {
             DescriptorPublicKey::SinglePub(pubkey) => PkOrF {
-                pubkey: Some(pubkey.key),
+                pubkey: Some(pubkey.key.clone()),
                 ..Default::default()
             },
             DescriptorPublicKey::XPub(xpub) => PkOrF {
@@ -89,8 +91,7 @@ impl PkOrF {
 }
 
 /// An item that needs to be satisfied
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "UPPERCASE")]
+#[derive(Debug, Clone)]
 pub enum SatisfiableItem {
     // Leaves
     /// Signature for a raw public key
@@ -159,8 +160,7 @@ impl SatisfiableItem {
 
     /// Returns a unique id for the [`SatisfiableItem`]
     pub fn id(&self) -> String {
-        get_checksum(&serde_json::to_string(self).expect("Failed to serialize a SatisfiableItem"))
-            .expect("Failed to compute a SatisfiableItem id")
+        get_checksum(&format!("{:?}", self)).expect("Failed to compute a SatisfiableItem id")
     }
 }
 
@@ -419,13 +419,12 @@ impl From<bool> for Satisfaction {
 }
 
 /// Descriptor spending policy
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct Policy {
     /// Identifier for this policy node
     pub id: String,
 
     /// Type of this policy node
-    #[serde(flatten)]
     pub item: SatisfiableItem,
     /// How much a given PSBT already satisfies this policy node in terms of signatures
     pub satisfaction: Satisfaction,
@@ -717,7 +716,10 @@ impl From<SatisfiableItem> for Policy {
 
 fn signer_id(key: &DescriptorPublicKey, secp: &SecpCtx) -> SignerId {
     match key {
-        DescriptorPublicKey::SinglePub(pubkey) => pubkey.key.to_pubkeyhash().into(),
+        DescriptorPublicKey::SinglePub(pubkey) => match pubkey.key {
+            SinglePubKey::FullKey(key) => key.to_pubkeyhash().into(),
+            SinglePubKey::XOnly(key) => SignerId::XOnly(key),
+        },
         DescriptorPublicKey::XPub(xpub) => xpub.root_fingerprint(secp).into(),
     }
 }
@@ -753,18 +755,30 @@ fn signature(
 
 fn signature_in_psbt(psbt: &Psbt, key: &DescriptorPublicKey, secp: &SecpCtx) -> bool {
     //TODO check signature validity
-    psbt.inputs.iter().all(|input| match key {
-        DescriptorPublicKey::SinglePub(key) => input.partial_sigs.contains_key(&key.key),
-        DescriptorPublicKey::XPub(xpub) => {
-            let pubkey = input
-                .bip32_derivation
-                .iter()
-                .find(|(_, (f, _))| *f == xpub.root_fingerprint(secp))
-                .map(|(p, _)| p);
-            //TODO check actual derivation matches
-            match pubkey {
-                Some(pubkey) => input.partial_sigs.contains_key(pubkey),
-                None => false,
+    psbt.inputs.iter().all(|input| {
+        match key {
+            DescriptorPublicKey::SinglePub(key) => match key.key {
+                SinglePubKey::FullKey(key) => input.partial_sigs.contains_key(&key),
+                SinglePubKey::XOnly(key) => {
+                    if input.tap_internal_key == Some(key) {
+                        input.tap_key_sig.is_some()
+                    } else {
+                        false
+                    }
+                }
+            },
+
+            DescriptorPublicKey::XPub(xpub) => {
+                let pubkey = input
+                    .bip32_derivation
+                    .iter()
+                    .find(|(_, (f, _))| *f == xpub.root_fingerprint(secp))
+                    .map(|(p, _)| p);
+                //TODO check actual derivation matches
+                match pubkey {
+                    Some(pubkey) => input.partial_sigs.contains_key(pubkey),
+                    None => false,
+                }
             }
         }
     })
@@ -891,6 +905,7 @@ impl<Ctx: ScriptContext> ExtractPolicy for Miniscript<DescriptorPublicKey, Ctx> 
 
                 Policy::make_thresh(mapped, threshold)?
             }
+            Terminal::MultiA(_, _) => todo!("TR script descriptors not supported yet"),
         })
     }
 }
@@ -969,6 +984,7 @@ impl ExtractPolicy for Descriptor<DescriptorPublicKey> {
                 WshInner::SortedMulti(ref keys) => make_sortedmulti(keys, signers, build_sat, secp),
             },
             Descriptor::Bare(ms) => Ok(ms.as_inner().extract_policy(signers, build_sat, secp)?),
+            Descriptor::Tr(tr) => Ok(Some(signature(tr.internal_key(), signers, build_sat, secp))),
         }
     }
 }

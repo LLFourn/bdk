@@ -285,7 +285,10 @@ impl<'a, B, D: BatchDatabase, Cs: CoinSelectionAlgorithm<D>, Ctx: TxBuilderConte
             .collect::<Result<Vec<_>, _>>()?;
 
         for utxo in utxos {
-            let descriptor = self.wallet.get_descriptor_for_keychain(utxo.keychain);
+            let descriptor = self
+                .wallet
+                .get_descriptor_for_script_pubkey(&utxo.txout.script_pubkey)?
+                .expect("exists because we got it out of database");
             let satisfaction_weight = descriptor.max_satisfaction_weight().unwrap();
             self.params.utxos.push(WeightedUtxo {
                 satisfaction_weight,

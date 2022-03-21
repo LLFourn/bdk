@@ -91,11 +91,13 @@ use std::sync::Arc;
 use bitcoin::blockdata::opcodes;
 use bitcoin::blockdata::script::Builder as ScriptBuilder;
 use bitcoin::hashes::{hash160, Hash};
+use bitcoin::schnorr::{KeyPair, XOnlyPublicKey};
 use bitcoin::secp256k1::{Message, Secp256k1};
 use bitcoin::util::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey, Fingerprint};
-use bitcoin::util::{psbt, sighash::SigHashCache};
+use bitcoin::util::{psbt, schnorr, taproot};
 use bitcoin::{EcdsaSigHashType as SigHashType, PrivateKey, Script, SigHash};
 
+use miniscript::bitcoin::util::sighash;
 use miniscript::descriptor::{DescriptorSecretKey, DescriptorSinglePriv, DescriptorXKey, KeyMap};
 use miniscript::{Legacy, MiniscriptKey, Segwitv0};
 
@@ -108,6 +110,8 @@ use crate::descriptor::XKeyUtils;
 pub enum SignerId {
     /// Bitcoin HASH160 (RIPEMD160 after SHA256) hash of an ECDSA public key
     PkHash(hash160::Hash),
+    /// Schnorr xonly key
+    XOnly(XOnlyPublicKey),
     /// The fingerprint of a BIP32 extended key
     Fingerprint(Fingerprint),
     /// Dummy identifier
@@ -273,6 +277,52 @@ impl Signer for DescriptorXKey<ExtendedPrivKey> {
     }
 }
 
+fn tap_signature(
+    key: &PrivateKey,
+    psbt: &mut psbt::PartiallySignedTransaction,
+    input_index: usize,
+    secp: &SecpCtx,
+) -> Result<(), SignerError> {
+    let mut keypair = KeyPair::from_secret_key(secp, key.key);
+    let public_key = keypair.public_key();
+
+    if let Some(internal_key) = psbt.inputs[input_index].tap_internal_key {
+        if internal_key != public_key {
+            return Ok(());
+        }
+        let tweak = taproot::TapTweakHash::from_key_and_tweak(public_key, None);
+        keypair.tweak_add_assign(&secp, &tweak).unwrap();
+        let mut cache = sighash::SigHashCache::new(&psbt.unsigned_tx);
+
+        let witness_utxos = psbt
+            .inputs
+            .iter()
+            .map(|i| i.witness_utxo.clone())
+            .collect::<Option<Vec<_>>>()
+            .ok_or(SignerError::MissingWitnessUtxo)?;
+
+        let psbt_input = &mut psbt.inputs[input_index];
+
+        let prevouts = sighash::Prevouts::All(&witness_utxos);
+        let sighash_type = psbt_input
+            .sighash_type
+            .map(sighash::SchnorrSigHashType::from)
+            .unwrap_or(sighash::SchnorrSigHashType::Default);
+
+        let sighash = cache
+            .taproot_signature_hash(input_index, &prevouts, None, None, sighash_type)
+            .unwrap();
+        let signature = secp
+            .sign_schnorr_no_aux_rand(&Message::from_slice(sighash.as_ref()).unwrap(), &keypair);
+
+        psbt_input.tap_key_sig = Some(schnorr::SchnorrSig {
+            sig: signature,
+            hash_ty: sighash_type,
+        });
+    }
+    Ok(())
+}
+
 impl Signer for PrivateKey {
     fn sign(
         &self,
@@ -289,6 +339,12 @@ impl Signer for PrivateKey {
             || psbt.inputs[input_index].final_script_witness.is_some()
         {
             return Ok(());
+        }
+
+        if psbt.inputs[input_index].tap_internal_key.is_some()
+            || psbt.inputs[input_index].tap_merkle_root.is_some()
+        {
+            return tap_signature(self, psbt, input_index, secp);
         }
 
         let pubkey = self.public_key(secp);
@@ -309,10 +365,6 @@ impl Signer for PrivateKey {
             &Message::from_slice(&hash.into_inner()[..]).unwrap(),
             &self.key,
         );
-
-        // let mut final_signature = Vec::with_capacity(75);
-        // final_signature.extend_from_slice(&signature.serialize_der());
-        // final_signature.push(sighash.as_u32() as u8);
 
         psbt.inputs[input_index].partial_sigs.insert(
             pubkey,
@@ -610,7 +662,7 @@ impl ComputeSighash for Segwitv0 {
         };
 
         Ok((
-            SigHashCache::new(&psbt.unsigned_tx)
+            sighash::SigHashCache::new(&psbt.unsigned_tx)
                 .segwit_signature_hash(input_index, &script, value, sighash)
                 .expect("should be impossible to get an encoding error here"),
             sighash,
