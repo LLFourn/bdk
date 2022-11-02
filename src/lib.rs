@@ -11,7 +11,7 @@
 // licenses.
 
 // rustdoc will warn if there are missing docs
-#![warn(missing_docs)]
+// #![warn(missing_docs)]
 // only enables the `doc_cfg` feature when
 // the `docsrs` configuration attribute is defined
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -260,6 +260,7 @@ pub mod testutils;
 #[allow(unused_imports)]
 #[macro_use]
 pub(crate) mod error;
+pub mod blockchain;
 pub mod descriptor;
 #[cfg(feature = "test-md-docs")]
 mod doctest;
@@ -281,3 +282,5 @@ pub use wallet::Wallet;
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION", "unknown")
 }
+
+pub use bdk_core::BlockId;

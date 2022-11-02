@@ -125,25 +125,6 @@ pub enum Error {
     /// [`crate::blockchain::WalletSync`] sync attempt failed due to missing scripts in cache which
     /// are needed to satisfy `stop_gap`.
     MissingCachedScripts(MissingCachedScripts),
-
-    #[cfg(feature = "electrum")]
-    /// Electrum client error
-    Electrum(electrum_client::Error),
-    #[cfg(feature = "esplora")]
-    /// Esplora client error
-    Esplora(Box<crate::blockchain::esplora::EsploraError>),
-    #[cfg(feature = "compact_filters")]
-    /// Compact filters client error)
-    CompactFilters(crate::blockchain::compact_filters::CompactFiltersError),
-    #[cfg(feature = "key-value-db")]
-    /// Sled database error
-    Sled(sled::Error),
-    #[cfg(feature = "rpc")]
-    /// Rpc client error
-    Rpc(bitcoincore_rpc::Error),
-    #[cfg(feature = "sqlite")]
-    /// Rusqlite client error
-    Rusqlite(rusqlite::Error),
 }
 
 /// Errors returned by miniscript when updating inconsistent PSBTs
@@ -219,16 +200,6 @@ impl_error!(bitcoincore_rpc::Error, Rpc);
 #[cfg(feature = "sqlite")]
 impl_error!(rusqlite::Error, Rusqlite);
 
-#[cfg(feature = "compact_filters")]
-impl From<crate::blockchain::compact_filters::CompactFiltersError> for Error {
-    fn from(other: crate::blockchain::compact_filters::CompactFiltersError) -> Self {
-        match other {
-            crate::blockchain::compact_filters::CompactFiltersError::Global(e) => *e,
-            err => Error::CompactFilters(err),
-        }
-    }
-}
-
 #[cfg(feature = "verify")]
 impl From<crate::wallet::verify::VerifyError> for Error {
     fn from(other: crate::wallet::verify::VerifyError) -> Self {
@@ -236,12 +207,5 @@ impl From<crate::wallet::verify::VerifyError> for Error {
             crate::wallet::verify::VerifyError::Global(inner) => *inner,
             err => Error::Verification(err),
         }
-    }
-}
-
-#[cfg(feature = "esplora")]
-impl From<crate::blockchain::esplora::EsploraError> for Error {
-    fn from(other: crate::blockchain::esplora::EsploraError) -> Self {
-        Error::Esplora(Box::new(other))
     }
 }

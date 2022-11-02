@@ -12,18 +12,17 @@
 //! Wallet
 //!
 //! This module defines the [`Wallet`] structure.
-use std::collections::HashMap;
-use std::collections::{BTreeMap, HashSet};
-use std::fmt;
-use std::ops::{Deref, RangeBounds};
-use std::str::FromStr;
-use std::sync::Arc;
-
 use bdk_core::{
     BlockId, ChangeSet, SparseChain, SpkTracker, TxGraph, TxHeight, Update, UpdateFailure,
 };
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::Secp256k1;
+use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
+use std::ops::{Deref, RangeBounds};
+use std::str::FromStr;
+use std::sync::Arc;
 
 use bitcoin::consensus::encode::serialize;
 use bitcoin::util::psbt;
@@ -59,7 +58,7 @@ use utils::{check_nsequence_rbf, After, Older, SecpCtx};
 use crate::descriptor::policy::BuildSatisfaction;
 use crate::descriptor::{
     get_checksum, into_wallet_descriptor_checked, DerivedDescriptor, DescriptorMeta,
-    ExtendedDescriptor, ExtractPolicy, IntoWalletDescriptor, Policy, XKeyUtils,
+    ExtendedDescriptor, ExtractPolicy, IntoWalletDescriptor, Policy, SpkIter, XKeyUtils,
 };
 use crate::error::{Error, MiniscriptPsbtError};
 use crate::psbt::PsbtUtils;
@@ -68,7 +67,7 @@ use crate::testutils;
 use crate::types::*;
 use crate::wallet::coin_selection::Excess::{Change, NoChange};
 
-const CACHE_ADDR_BATCH_SIZE: u32 = 100;
+const CACHE_ADDR_BATCH_SIZE: u32 = 100; //TODO: remove this
 const COINBASE_MATURITY: u32 = 100;
 
 /// A Bitcoin wallet
@@ -147,6 +146,49 @@ impl fmt::Display for AddressInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApplyUpdateErr {
+    Chain(UpdateFailure),
+    MissingTx(Vec<Txid>),
+}
+
+impl core::fmt::Display for ApplyUpdateErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApplyUpdateErr::Chain(chain_err) => write!(f, "{}", chain_err),
+            ApplyUpdateErr::MissingTx(missing) => write!(
+                f,
+                "could not apply update because it is missing the full transactions for {}",
+                missing
+                    .into_iter()
+                    .map(|txid| txid.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ApplyUpdateErr {}
+
+#[derive(Clone, Debug, PartialEq)]
+/// An update that includes the last active indexes of each keychain.
+pub struct WalletScanUpdate<K> {
+    /// The update data
+    pub update: Update,
+    /// The last active indexes of each keychain
+    pub last_active_indexes: BTreeMap<K, u32>,
+}
+
+impl<K> Default for WalletScanUpdate<K> {
+    fn default() -> Self {
+        Self {
+            update: Default::default(),
+            last_active_indexes: Default::default(),
+        }
+    }
+}
+
 impl Wallet {
     /// Create a wallet.
     ///
@@ -197,9 +239,20 @@ impl Wallet {
         self.network
     }
 
+    /// Iterator over all keychains in this wallet
+    pub fn keychanins(&self) -> impl ExactSizeIterator<Item = KeychainKind> {
+        let mut keychains = vec![KeychainKind::External];
+
+        if self.change_descriptor.is_some() {
+            keychains.push(KeychainKind::Internal);
+        }
+
+        keychains.into_iter()
+    }
+
     // Return a newly derived address for the specified `keychain`.
     fn get_new_address(&mut self, keychain: KeychainKind) -> AddressInfo {
-        let next_index = self.fetch_next_index(keychain);
+        let next_index = self.next_derivation_index(keychain);
 
         let definite_descriptor = self
             .get_descriptor_for_keychain(keychain)
@@ -285,6 +338,7 @@ impl Wallet {
     /// and `Ok(false)` if all the required addresses are already cached. This function is useful to
     /// explicitly cache addresses in a wallet to do things like check [`Wallet::is_mine`] on
     /// transaction output scripts.
+    #[deprecated = "The concept of use “caching” addresses no longer exists. Use ensure_derived_up_to instead."]
     pub fn ensure_addresses_cached(&mut self, max_addresses: u32) -> bool {
         let mut new_addresses_cached = false;
         for keychain in [KeychainKind::External, KeychainKind::Internal] {
@@ -294,7 +348,7 @@ impl Wallet {
                 true => max_addresses,
             };
 
-            let next_to_derive = self.fetch_next_index(keychain);
+            let next_to_derive = self.next_derivation_index(keychain);
             if next_to_derive > end {
                 return false;
             }
@@ -309,6 +363,32 @@ impl Wallet {
                 self.spk_tracker.add_spk((keychain, index), spk);
             }
         }
+        true
+    }
+
+    /// Derive all addresses up to and including `index`.
+    pub fn ensure_derived_up_to(&mut self, keychain: KeychainKind, index: u32) -> bool {
+        let descriptor = self.get_descriptor_for_keychain(keychain).clone();
+        let end = match descriptor.has_wildcard() {
+            false => 0,
+            true => index,
+        };
+
+        let next_to_derive = self.next_derivation_index(keychain);
+        if next_to_derive > end {
+            return false;
+        }
+
+        for index in next_to_derive..=end {
+            let spk = descriptor
+                .at_derivation_index(index)
+                .derived_descriptor(&self.secp)
+                .expect("the descritpor cannot need hardened derivation")
+                .script_pubkey();
+
+            self.spk_tracker.add_spk((keychain, index), spk);
+        }
+
         true
     }
 
@@ -366,7 +446,7 @@ impl Wallet {
                 Some((_, derivation)) => {
                     if let Some(stop_gap) = stop_gap {
                         let max_addresses = derivation.saturating_add(stop_gap);
-                        self.ensure_addresses_cached(max_addresses);
+                        self.ensure_derived_up_to(keychain, max_addresses);
                     }
                 }
                 None => continue,
@@ -386,10 +466,50 @@ impl Wallet {
     }
 
     /// Applies an update.
-    pub fn apply_update(&mut self, update: Update) -> Result<ChangeSet, UpdateFailure> {
-        let change_set = self.sparse_chain.apply_update(&update)?;
-        self.spk_tracker.scan(&self.tx_graph);
+    pub fn apply_update(&mut self, update: Update) -> Result<ChangeSet, ApplyUpdateErr> {
+        let change_set = self
+            .sparse_chain
+            .determine_changeset(&update)
+            .map_err(ApplyUpdateErr::Chain)?;
+        let mut graph_addition = TxGraph::default();
+        for tx in update.iter_full_txs() {
+            graph_addition.insert_tx(tx);
+        }
+
+        let missing = change_set
+            .tx_additions()
+            .filter(|txid| graph_addition.tx(*txid).is_none())
+            .collect::<Vec<_>>();
+
+        if !missing.is_empty() {
+            return Err(ApplyUpdateErr::MissingTx(missing));
+        }
+
+        self.sparse_chain.apply_changeset(&change_set);
+        self.spk_tracker.scan(&graph_addition);
+        self.tx_graph.extend(graph_addition);
         Ok(change_set)
+    }
+
+    pub fn start_wallet_scan(&self) -> BTreeMap<KeychainKind, SpkIter> {
+        self.keychanins()
+            .map(|keychain| (keychain, self.iter_all_script_pubkeys(keychain)))
+            .collect()
+    }
+
+    /// Applies a *wallet scan* update.
+    ///
+    /// This is where the update also needs to update the derivation index of the keychains.
+    /// Usually this is only required upon first restoring a wallet from the master key.
+    pub fn apply_wallet_scan(
+        &mut self,
+        update: WalletScanUpdate<KeychainKind>,
+    ) -> Result<ChangeSet, ApplyUpdateErr> {
+        for (keychain, last_active_index) in update.last_active_indexes {
+            self.ensure_derived_up_to(keychain, last_active_index);
+        }
+
+        self.apply_update(update.update)
     }
 
     /// Applies a set of blocks
@@ -422,7 +542,10 @@ impl Wallet {
                 .for_each(|tx| update.insert_txid(tx.txid(), TxHeight::Confirmed(height)));
         }
 
-        self.apply_update(update)
+        self.apply_update(update).map_err(|err| match err {
+            ApplyUpdateErr::Chain(err) => err,
+            ApplyUpdateErr::MissingTx(_) => unreachable!("blocks always have the full tx"),
+        })
     }
 
     /// Applies a single block and relevant txs
@@ -449,6 +572,10 @@ impl Wallet {
 
         self.spk_tracker.scan(&self.tx_graph);
         Ok(())
+    }
+
+    pub fn iter_all_script_pubkeys(&self, keychain: KeychainKind) -> SpkIter {
+        SpkIter::new(self.get_descriptor_for_keychain(keychain).clone())
     }
 
     /// Returns the `UTXO` owned by this wallet corresponding to `outpoint` if it exists in the
@@ -1448,7 +1575,7 @@ impl Wallet {
         Some(descriptor.at_derivation_index(child))
     }
 
-    fn fetch_index(&self, keychain: KeychainKind) -> Option<u32> {
+    pub fn derivation_index(&self, keychain: KeychainKind) -> Option<u32> {
         self.spk_tracker
             .script_pubkeys()
             .range(&(keychain, u32::MIN)..=&(keychain, u32::MAX))
@@ -1456,8 +1583,9 @@ impl Wallet {
             .map(|((_, last), _)| *last)
     }
 
-    fn fetch_next_index(&self, keychain: KeychainKind) -> u32 {
-        self.fetch_index(keychain)
+    pub fn next_derivation_index(&self, keychain: KeychainKind) -> u32 {
+        self.derivation_index(keychain)
+            .map(|curr_index| curr_index + 1)
             .unwrap_or(0)
             // BIP32 only allows this many derivations so we cap it
             .min(1 << 31 - 1)
@@ -4542,82 +4670,68 @@ pub(crate) mod test {
     //         builder.finish().unwrap();
     //     }
 
-    //     #[test]
-    //     fn test_get_address() {
-    //         use crate::descriptor::template::Bip84;
-    //         let key = bitcoin::util::bip32::ExtendedPrivKey::from_str("tprv8ZgxMBicQKsPcx5nBGsR63Pe8KnRUqmbJNENAfGftF3yuXoMMoVJJcYeUw5eVkm9WBPjWYt6HMWYJNesB5HaNVBaFc1M6dRjWSYnmewUMYy").unwrap();
-    //         let wallet = Wallet::new(
-    //             Bip84(key, KeychainKind::External),
-    //             Some(Bip84(key, KeychainKind::Internal)),
-    //             Network::Regtest,
-    //             MemoryDatabase::default(),
-    //         )
-    //         .unwrap();
+    #[test]
+    fn test_get_address() {
+        use crate::descriptor::template::Bip84;
+        let key = bitcoin::util::bip32::ExtendedPrivKey::from_str("tprv8ZgxMBicQKsPcx5nBGsR63Pe8KnRUqmbJNENAfGftF3yuXoMMoVJJcYeUw5eVkm9WBPjWYt6HMWYJNesB5HaNVBaFc1M6dRjWSYnmewUMYy").unwrap();
+        let mut wallet = Wallet::new(
+            Bip84(key, KeychainKind::External),
+            Some(Bip84(key, KeychainKind::Internal)),
+            Network::Regtest,
+        )
+        .unwrap();
 
-    //         assert_eq!(
-    //             wallet.get_address(AddressIndex::New).unwrap(),
-    //             AddressInfo {
-    //                 index: 0,
-    //                 address: Address::from_str("bcrt1qrhgaqu0zvf5q2d0gwwz04w0dh0cuehhqvzpp4w").unwrap(),
-    //                 keychain: KeychainKind::External,
-    //             }
-    //         );
+        assert_eq!(
+            wallet.get_address(AddressIndex::New),
+            AddressInfo {
+                index: 0,
+                address: Address::from_str("bcrt1qrhgaqu0zvf5q2d0gwwz04w0dh0cuehhqvzpp4w").unwrap(),
+                keychain: KeychainKind::External,
+            }
+        );
 
-    //         assert_eq!(
-    //             wallet.get_internal_address(AddressIndex::New).unwrap(),
-    //             AddressInfo {
-    //                 index: 0,
-    //                 address: Address::from_str("bcrt1q0ue3s5y935tw7v3gmnh36c5zzsaw4n9c9smq79").unwrap(),
-    //                 keychain: KeychainKind::Internal,
-    //             }
-    //         );
+        assert_eq!(
+            wallet.get_internal_address(AddressIndex::New),
+            AddressInfo {
+                index: 0,
+                address: Address::from_str("bcrt1q0ue3s5y935tw7v3gmnh36c5zzsaw4n9c9smq79").unwrap(),
+                keychain: KeychainKind::Internal,
+            }
+        );
 
-    //         let wallet = Wallet::new(
-    //             Bip84(key, KeychainKind::External),
-    //             None,
-    //             Network::Regtest,
-    //             MemoryDatabase::default(),
-    //         )
-    //         .unwrap();
+        let mut wallet =
+            Wallet::new(Bip84(key, KeychainKind::External), None, Network::Regtest).unwrap();
 
-    //         assert_eq!(
-    //             wallet.get_internal_address(AddressIndex::New).unwrap(),
-    //             AddressInfo {
-    //                 index: 0,
-    //                 address: Address::from_str("bcrt1qrhgaqu0zvf5q2d0gwwz04w0dh0cuehhqvzpp4w").unwrap(),
-    //                 keychain: KeychainKind::Internal,
-    //             },
-    //             "when there's no internal descriptor it should just use external"
-    //         );
-    //     }
+        assert_eq!(
+            wallet.get_internal_address(AddressIndex::New),
+            AddressInfo {
+                index: 0,
+                address: Address::from_str("bcrt1qrhgaqu0zvf5q2d0gwwz04w0dh0cuehhqvzpp4w").unwrap(),
+                keychain: KeychainKind::Internal,
+            },
+            "when there's no internal descriptor it should just use external"
+        );
+    }
 
-    //     #[test]
-    //     fn test_get_address_no_reuse_single_descriptor() {
-    //         use crate::descriptor::template::Bip84;
-    //         use std::collections::HashSet;
+    #[test]
+    fn test_get_address_no_reuse_single_descriptor() {
+        use crate::descriptor::template::Bip84;
+        use std::collections::HashSet;
 
-    //         let key = bitcoin::util::bip32::ExtendedPrivKey::from_str("tprv8ZgxMBicQKsPcx5nBGsR63Pe8KnRUqmbJNENAfGftF3yuXoMMoVJJcYeUw5eVkm9WBPjWYt6HMWYJNesB5HaNVBaFc1M6dRjWSYnmewUMYy").unwrap();
-    //         let wallet = Wallet::new(
-    //             Bip84(key, KeychainKind::External),
-    //             None,
-    //             Network::Regtest,
-    //             MemoryDatabase::default(),
-    //         )
-    //         .unwrap();
+        let key = bitcoin::util::bip32::ExtendedPrivKey::from_str("tprv8ZgxMBicQKsPcx5nBGsR63Pe8KnRUqmbJNENAfGftF3yuXoMMoVJJcYeUw5eVkm9WBPjWYt6HMWYJNesB5HaNVBaFc1M6dRjWSYnmewUMYy").unwrap();
+        let mut wallet =
+            Wallet::new(Bip84(key, KeychainKind::External), None, Network::Regtest).unwrap();
 
-    //         let mut used_set = HashSet::new();
+        let mut used_set = HashSet::new();
 
-    //         (0..3).for_each(|_| {
-    //             let external_addr = wallet.get_address(AddressIndex::New).unwrap().address;
-    //             assert!(used_set.insert(external_addr));
+        (0..3).for_each(|_| {
+            let external_addr = wallet.get_address(AddressIndex::New).address;
+            assert!(used_set.insert(external_addr));
 
-    //             let internal_addr = wallet
-    //                 .get_internal_address(AddressIndex::New)
-    //                 .unwrap()
-    //                 .address;
-    //             assert!(used_set.insert(internal_addr));
-    //         });
-    //     }
+            let internal_addr = wallet.get_internal_address(AddressIndex::New).address;
+            assert!(used_set.insert(internal_addr));
+        });
+    }
 
     //     #[test]
     //     fn test_taproot_psbt_populate_tap_key_origins() {

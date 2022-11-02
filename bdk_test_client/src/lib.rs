@@ -30,7 +30,7 @@ impl TestClient {
 
         let mut conf = electrsd::Conf::default();
         conf.view_stderr = log_enabled!(Level::Debug);
-        conf.http_enabled = cfg!(feature = "test-esplora");
+        conf.http_enabled = cfg!(feature = "esplora");
 
         let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &conf).unwrap();
 
@@ -192,7 +192,7 @@ impl TestClient {
         block.header.block_hash().to_hex()
     }
 
-    pub fn generate(&mut self, num_blocks: u64, address: Option<Address>) {
+    pub fn generate(&mut self, num_blocks: u64, address: Option<Address>) -> u32 {
         let address = address.unwrap_or_else(|| self.get_new_address(None, None).unwrap());
         let hashes = self.generate_to_address(num_blocks, &address).unwrap();
         let best_hash = hashes.last().unwrap();
@@ -201,6 +201,7 @@ impl TestClient {
         self.wait_for_block(height);
 
         debug!("Generated blocks to new height {}", height);
+        height as u32
     }
 
     pub fn invalidate(&mut self, num_blocks: u64) {

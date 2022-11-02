@@ -35,7 +35,9 @@ pub mod checksum;
 pub mod dsl;
 pub mod error;
 pub mod policy;
+mod spk_iter;
 pub mod template;
+pub use spk_iter::SpkIter;
 
 pub use self::checksum::get_checksum;
 pub use self::error::Error as DescriptorError;
