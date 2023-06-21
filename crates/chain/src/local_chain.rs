@@ -248,28 +248,27 @@ impl LocalChain {
     pub fn update(&mut self, new_tip: CheckPoint) -> Result<ChangeSet, CannotConnectError> {
         let mut updated_cps = BTreeMap::<u32, CheckPoint>::new();
         let mut agreement_height = Option::<u32>::None;
-        let mut complete_match = false;
 
         for cp in new_tip.iter() {
             let block = cp.block_id();
             let original_cp = self.checkpoints.get(&block.height);
 
-            // if original block of height does not exist, or if the hash does not match we will
-            // need to update the original checkpoint at that height
-            if original_cp.map(CheckPoint::block_id) != Some(block) {
-                updated_cps.insert(block.height, cp.clone());
-            }
+            match original_cp {
+                Some(original_cp) if original_cp.block_id()  != block => {
+                    updated_cps.insert(block.height, cp.clone());
+                }
+                Some(original_cp) => {
+                    if agreement_height.is_none() {
+                        agreement_height = Some(block.height);
+                    }
 
-            if let Some(original_cp) = original_cp {
-                // record the first agreement height
-                if agreement_height.is_none() && original_cp.block_id() == block {
-                    agreement_height = Some(block.height);
-                }
-                // break if the internal pointers of the checkpoints are the same
-                if Arc::as_ptr(&original_cp.0) == Arc::as_ptr(&cp.0) {
-                    complete_match = true;
-                    break;
-                }
+                    if Arc::as_ptr(&original_cp.0) == Arc::as_ptr(&cp.0) {
+                        break;
+                    }
+                },
+                None => {
+                    updated_cps.insert(block.height, cp.clone());
+                },
             }
         }
 
@@ -315,10 +314,13 @@ impl LocalChain {
         if let Some(&start_height) = updated_cps.keys().next() {
             self.checkpoints.split_off(&invalidate_lb);
             self.checkpoints.append(&mut updated_cps);
-            if !self.is_empty() && !complete_match {
-                self.fix_links(start_height);
-            }
+            self.fix_links(start_height);
         }
+
+       // You need to fix links from C so it points to B
+       //      *               =
+       // old [A] [B] [_] [D] [E][F]
+       // new [A] [_] [C] [_] [E][F]
 
         Ok(changeset)
     }
