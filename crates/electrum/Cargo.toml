@@ -13,7 +13,7 @@ readme = "README.md"
 
 [dependencies]
 bdk_chain = { path = "../chain", version = "0.16.0" }
-electrum-client = { version = "0.20" }
+electrum-client = { version = "0.20", rev = "c7a96f7264348537f4b57dd149fd114f22844b16", git = "https://github.com/thunderbiscuit/rust-electrum-client", default-features = false, features = ["use-rustls-ring"] }
 #rustls = { version = "=0.21.1", optional = true, features = ["dangerous_configuration"] }
 
 [dev-dependencies]
